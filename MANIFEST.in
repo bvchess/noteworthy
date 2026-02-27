@@ -1,0 +1,4 @@
+include README.md
+include LICENSE
+include src/noteworthy/notestore.proto
+recursive-include src/noteworthy/viewer/static *

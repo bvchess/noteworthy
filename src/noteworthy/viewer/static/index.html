@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notes Viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div id="search-box">
+      <input type="search" id="search-input" placeholder="Search notes..." autocomplete="off">
+    </div>
+    <nav id="folder-tree"></nav>
+  </aside>
+  <section id="note-list">
+    <div id="note-list-header"></div>
+    <div id="note-list-items"></div>
+  </section>
+  <main id="note-content">
+    <div id="note-date-banner"></div>
+    <div id="note-body"></div>
+  </main>
+</div>
+<div id="lightbox" class="hidden">
+  <div id="lightbox-backdrop"></div>
+  <img id="lightbox-img" src="" alt="">
+</div>
+<button id="theme-toggle" title="Toggle dark mode">
+  <span id="theme-icon">&#9790;</span>
+</button>
+<script src="/static/app.js"></script>
+</body>
+</html>

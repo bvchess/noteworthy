@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a problem with Noteworthy
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for the report. Please include as much detail as you can."
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 14.3"
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version
+      placeholder: "e.g. 3.12.2"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "Provide a minimal set of steps."
+      placeholder: "1. Run ...\n2. Click ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      render: shell
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context

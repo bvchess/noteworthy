@@ -128,7 +128,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
     def _api_tree(self):
         """Return the full folder tree as JSON."""
         def folder_to_dict(folder):
-            total = _count_all_notes(folder)
             return {
                 "id": folder.id,
                 "name": folder.name,
@@ -136,7 +135,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 "sort_order": folder.sort_order,
                 "is_expanded": folder.is_expanded,
                 "note_count": len(folder.note_ids),
-                "total_note_count": total,
                 "children": [
                     folder_to_dict(c)
                     for c in sorted(folder.children, key=lambda f: f.display_order)
@@ -154,7 +152,6 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 "is_smart_folder": False,
                 "is_all_folder": True,
                 "note_count": total,
-                "total_note_count": total,
                 "children": [],
             }
             folders = [

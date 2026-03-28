@@ -113,7 +113,7 @@
     const icon = folder.is_smart_folder ? GEAR_SVG : FOLDER_SVG;
     html += '<span class="folder-icon">' + icon + "</span>";
     html += '<span class="folder-name">' + escapeHtml(folder.name) + "</span>";
-    const count = hasChildren ? folder.total_note_count : folder.note_count;
+    const count = folder.note_count;
     if (count > 0) {
       html += '<span class="folder-count">' + count + "</span>";
     }

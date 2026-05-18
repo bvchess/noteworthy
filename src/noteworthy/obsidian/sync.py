@@ -94,6 +94,20 @@ class _DecodedNote:
     file_attachments: list[Attachment] = field(default_factory=list)
 
 
+@dataclass
+class _ExistingNote:
+    """A note we found already in the vault on a previous run, matched by UUID.
+
+    Drives rename/move detection (compare `path` to the freshly-computed path)
+    and frontmatter round-tripping: `aliases` is preserved so user-added or
+    historical entries survive, and `extras` carries any frontmatter keys we
+    don't own (per §11.2 the user can add their own and we leave them alone).
+    """
+    path: Path
+    aliases: list[str] = field(default_factory=list)
+    extras: dict = field(default_factory=dict)
+
+
 # ---------- public entry point ----------
 
 
@@ -106,7 +120,11 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
     accounts_with_content = [a for a in accounts if any(_iter_real_notes(a))]
     flatten_account = len(accounts_with_content) <= 1
 
-    layout = _build_note_layout(accounts_with_content, flatten_account)
+    # Re-export: scan what's already in the vault so we can detect renames /
+    # moves and preserve user-added frontmatter keys (requirements §11.2).
+    existing = _scan_vault(target_path)
+
+    layout = _build_note_layout(accounts_with_content, flatten_account, existing)
 
     data_loader = DatabaseNoteDataLoader(str(db_path or _DEFAULT_DB))
     try:
@@ -118,7 +136,7 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
             for d in decoded if d.note.uuid
         }
 
-        _write_notes(decoded, layout, target_path, note_path_by_uuid, data_loader)
+        _write_notes(decoded, layout, target_path, note_path_by_uuid, data_loader, existing)
         _copy_attachments(decoded, target_path)
     finally:
         data_loader.close()
@@ -156,7 +174,40 @@ def _folder_dirs_for(account: Account, folder_chain: tuple[Folder, ...], *, flat
     return tuple(parts)
 
 
-def _build_note_layout(accounts: list[Account], flatten_account: bool) -> dict[Note, _NoteLayout]:
+# ---------- step 2a: scan existing vault (re-export support) ----------
+
+
+def _scan_vault(target_path: Path) -> dict[str, _ExistingNote]:
+    """Walk `*.md` files under `target_path`, returning uuid → _ExistingNote.
+
+    Files without a parseable `apple_notes_uuid` frontmatter key are skipped
+    silently — they may be user-authored notes the exporter never touched.
+    UUIDs are normalized to uppercase for lookup symmetry with the rest of the
+    pipeline (`note_path_by_uuid` uses the same convention).
+    """
+    found: dict[str, _ExistingNote] = {}
+    for md_path in target_path.rglob("*.md"):
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        meta = frontmatter.parse(text)
+        uuid = meta.get("apple_notes_uuid")
+        if not isinstance(uuid, str) or not uuid:
+            continue
+        aliases = meta.get("aliases") or []
+        if not isinstance(aliases, list):
+            aliases = []
+        extras = {k: v for k, v in meta.items() if k not in frontmatter.OWNED_KEYS}
+        found[uuid.upper()] = _ExistingNote(path=md_path, aliases=list(aliases), extras=extras)
+    return found
+
+
+def _build_note_layout(
+    accounts: list[Account],
+    flatten_account: bool,
+    existing: dict[str, _ExistingNote] | None = None,
+) -> dict[Note, _NoteLayout]:
     """Compute the on-disk path for every note in `accounts`.
 
     Filenames are resolved vault-wide for uniqueness, sorted by (creation_date, id)
@@ -192,11 +243,12 @@ def _build_note_layout(accounts: list[Account], flatten_account: bool) -> dict[N
     )
 
     # Step 4: assemble the per-note layout, populating aliases when sanitization
-    # or disambiguation changed the on-disk name (requirements §5.1).
+    # or disambiguation changed the on-disk name (requirements §5.1) and when
+    # a previous export had a different on-disk filename (re-export rename, §11.2).
     layout: dict[Note, _NoteLayout] = {}
     for i, (note, _candidate, chain, account) in enumerate(candidates):
         filename = final_names[i]
-        aliases = [note.name] if note.name and note.name != filename else []
+        aliases = _compute_aliases(note, filename, existing)
         layout[note] = _NoteLayout(
             folder_dirs=_folder_dirs_for(account, chain, flatten_account=flatten_account),
             filename=filename,
@@ -205,6 +257,43 @@ def _build_note_layout(accounts: list[Account], flatten_account: bool) -> dict[N
             aliases=aliases,
         )
     return layout
+
+
+def _compute_aliases(
+    note: Note,
+    filename: str,
+    existing: dict[str, _ExistingNote] | None,
+) -> list[str]:
+    """Aliases for this note: preserve previous + add freshly-applicable.
+
+    Sources of truth, in priority order:
+      1. The existing aliases on disk (user might have added entries, prior
+         runs accumulated rename history) — these come first to keep order.
+      2. The previous on-disk filename, when this run is renaming the file —
+         appended so old wikilinks keep resolving.
+      3. The original (un-sanitized) display name, when sanitization changed
+         the filename — required by §5.1.
+    Deduplicated while preserving first-seen order.
+    """
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    def add(alias: str | None) -> None:
+        if alias and alias not in seen:
+            aliases.append(alias)
+            seen.add(alias)
+
+    previous = existing.get(note.uuid.upper()) if existing and note.uuid else None
+    if previous:
+        for a in previous.aliases:
+            add(a)
+        prev_stem = previous.path.stem
+        if prev_stem != filename:
+            add(prev_stem)
+
+    if note.name and note.name != filename:
+        add(note.name)
+    return aliases
 
 
 # ---------- step 3: decode ----------
@@ -358,12 +447,27 @@ def _write_notes(
     target_path: Path,
     note_path_by_uuid: dict[str, Path],
     data_loader: DatabaseNoteDataLoader,
+    existing: dict[str, _ExistingNote],
 ) -> None:
-    """Render each note's markdown and write `frontmatter + body` to its planned path."""
+    """Render each note's markdown and write `frontmatter + body` to its planned path.
+
+    When `existing` reports the note already lives at a different path, we
+    `os.replace` it into position first so the write happens at the new path
+    and the old file disappears (rename/move support — §11.2). Any frontmatter
+    keys we don't own are passed through to `frontmatter.render` as
+    `extra_user_keys` to preserve user edits.
+    """
     for d in decoded_notes:
         plan = layout[d.note]
         md_path = target_path / plan.relative_path
         md_path.parent.mkdir(parents=True, exist_ok=True)
+
+        previous = existing.get(d.note.uuid.upper()) if d.note.uuid else None
+        if previous and previous.path != md_path and previous.path.exists():
+            # Move the file into its new location before we rewrite it. Using
+            # os.replace keeps the operation atomic on the same filesystem and
+            # avoids a half-baked state if the rewrite below fails.
+            os.replace(previous.path, md_path)
 
         body = _render_body(d, md_path, note_path_by_uuid, data_loader)
         fm = frontmatter.render(
@@ -371,6 +475,7 @@ def _write_notes(
             account_name=plan.account.name,
             folder_path=plan.folder_path_in_account,
             aliases=plan.aliases,
+            extra_user_keys=previous.extras if previous else None,
         )
 
         md_path.write_text(fm + body, encoding="utf-8")

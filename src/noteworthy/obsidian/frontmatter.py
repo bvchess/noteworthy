@@ -21,7 +21,14 @@ from typing import Any
 from noteworthy.notes_datatypes import Note
 
 
-__all__ = ["render"]
+__all__ = ["render", "parse", "OWNED_KEYS"]
+
+
+# The frontmatter keys this module writes (requirements §7). Everything else in
+# a parsed block is treated as a user-added key and preserved on re-export.
+OWNED_KEYS = frozenset({
+    "aliases", "tags", "created", "modified", "account", "folder", "apple_notes_uuid",
+})
 
 
 # ---------- tag sanitization (requirements §8) ----------
@@ -126,3 +133,84 @@ def render(
                 parts.append(f"{key}: {_emit_scalar(value)}")
 
     return "---\n" + "\n".join(parts) + "\n---\n"
+
+
+# ---------- parsing (inverse of `render`) ----------
+#
+# We parse the exact shape `render` emits — no need for a full YAML library:
+#   scalar:  `key: <value-or-quoted-string>`
+#   list:    `key:` followed by `  - <item-scalar>` lines
+# Comments, anchors, multi-line scalars, nested mappings etc. aren't produced
+# by the writer and aren't accepted by the reader. If a user manually edits a
+# file with something we can't parse, we fall back to "no extras" rather than
+# raising — the worst case is that user-added keys aren't preserved.
+
+
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+_LIST_ITEM_RE = re.compile(r"^  - (.*)$")
+
+
+def _unquote(s: str) -> str:
+    """Reverse `_quote`: strip outer double-quotes and unescape `\\` and `\\"`."""
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        inner = s[1:-1]
+        out = []
+        i = 0
+        while i < len(inner):
+            if inner[i] == "\\" and i + 1 < len(inner):
+                out.append(inner[i + 1])
+                i += 2
+            else:
+                out.append(inner[i])
+                i += 1
+        return "".join(out)
+    return s
+
+
+def parse(text: str) -> dict[str, Any]:
+    """Parse a frontmatter block written by `render`.
+
+    Returns a dict of {key: value} where value is either a string (for scalars
+    we don't try to type-infer back to datetime — round-tripping the literal is
+    enough for the re-export pipeline) or a list of strings (for list-shaped
+    keys like `aliases`/`tags`). Returns {} when no frontmatter block is found
+    or the format is unexpected.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+
+    body = m.group(1)
+    lines = body.split("\n")
+    result: dict[str, Any] = {}
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line or line.startswith("  "):
+            # A bare or list-item line at the top level is malformed; skip.
+            i += 1
+            continue
+        if ":" not in line:
+            i += 1
+            continue
+        key, _, value = line.partition(":")
+        value = value.lstrip()
+        if value:
+            # Scalar.
+            result[key] = _unquote(value)
+            i += 1
+            continue
+        # No inline value — gather the indented list items that follow.
+        items: list[str] = []
+        j = i + 1
+        while j < len(lines):
+            m2 = _LIST_ITEM_RE.match(lines[j])
+            if not m2:
+                break
+            items.append(_unquote(m2.group(1)))
+            j += 1
+        result[key] = items
+        i = j
+
+    return result

@@ -12,6 +12,8 @@ Export Apple Notes to Markdown with full formatting preservation.
 - Handles attachments (images, PDFs, documents)
 - Full table support with correct row/column ordering
 - Built-in web viewer for browsing backups (auto-installed, no dependencies required)
+- **Obsidian export mode** (`--obsidian`): writes a ready-to-open Obsidian vault
+  with wikilinks, frontmatter Properties, and a single `assets/` folder
 
 ## Requirements
 
@@ -73,6 +75,67 @@ To launch manually:
 ```bash
 python3 <backup_dir>/.noteworthy-viewer/server.py <backup_dir>
 ```
+
+## Obsidian Export Mode
+
+Pass `--obsidian` to write an [Obsidian](https://obsidian.md) vault instead of a Noteworthy backup:
+
+```bash
+scripts/noteworthy ~/Documents/MyVault --obsidian
+```
+
+The output is shaped to be opened directly in Obsidian — folders match Apple Notes, links between notes become wikilinks, dates and tags appear in the Properties panel, and a minimal `.obsidian/app.json` is written so the vault behaves correctly on first open.
+
+### What's different from backup mode
+
+| | Backup mode (default) | Obsidian mode (`--obsidian`) |
+| --- | --- | --- |
+| Notes | one directory per note | one `.md` file per note |
+| Attachments | per-note `Attachments/` subdir | single top-level `assets/` |
+| Inter-note links | `[Name](relative/path.md)` | `[[Name]]` (path-less wikilinks) |
+| Metadata | `.noteworthy.json` next to each note | YAML frontmatter at the top of each `.md` |
+| Smart folders | reproduced as symlink trees | skipped |
+| Deleted notes | preserved under `Deleted/` | skipped |
+| Viewer | bundled web viewer | open the directory in Obsidian |
+
+### Layout
+
+```
+MyVault/
+├── .obsidian/
+│   └── app.json
+├── assets/                       # every attachment, flat, globally-unique names
+│   ├── photo.jpg
+│   └── receipt.pdf
+├── Work/
+│   └── Project Plan.md
+└── Notes/
+    └── Grocery List.md
+```
+
+When more than one Apple Notes account is present (e.g. iCloud + On My Mac), folders sit under `<Account>/` instead of the vault root.
+
+### Re-exporting
+
+You can run the exporter again over an existing vault and it'll update only what's changed:
+
+- A note renamed in Apple Notes → the `.md` file is renamed; the old name is added to `aliases:` so old wikilinks still resolve.
+- A note moved between folders → the `.md` file relocates; path-less wikilinks survive the move.
+- A frontmatter key you added by hand (`priority: high`, custom tags, etc.) → preserved.
+- A note no longer in Apple Notes → left in place (you may have edited it).
+
+### Target-directory safety
+
+Before any writes, the exporter inspects the target and refuses combinations that would corrupt an existing export:
+
+| Target state | `--obsidian` | No flag |
+| --- | --- | --- |
+| Empty or doesn't exist | create Obsidian vault | create backup |
+| Has `.obsidian/` | re-export Obsidian vault | **error** — re-run with `--obsidian` |
+| Has `.noteworthy.json` somewhere | **error** — `--obsidian` would corrupt the backup | re-export backup |
+| Non-empty, neither marker | **error** in both modes | |
+
+See [`obsidian_requirements.md`](obsidian_requirements.md) for the full specification.
 
 ## Privacy
 

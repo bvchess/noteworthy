@@ -184,9 +184,12 @@ class TestStripTitleWithLeadingAttachment:
 
 class TestSkippedNoteWarningFormat:
     """Per §10 the warning must include the account name so the user knows
-    where to look in Apple Notes."""
+    where to look in Apple Notes. Two paths reach the same warning: missing
+    data (e.g. orphan row), and unreadable/encrypted data (password-protected
+    notes show up this way because the gzipped protobuf doesn't decode).
+    """
 
-    def test_warning_includes_account(self, tmp_path, capsys):
+    def test_warning_for_missing_data(self, tmp_path, capsys):
         db_path = tmp_path / "NoteStore.sqlite"
         b = create_test_db(db_path)
         b.add_account(pk=1, name="iCloud")
@@ -204,6 +207,36 @@ class TestSkippedNoteWarningFormat:
         err = capsys.readouterr().err
         assert "Locked Item" in err
         assert "iCloud" in err  # spec-required account context
+        # The note isn't written.
+        assert list(target.rglob("*.md")) == []
+
+    def test_warning_for_undecodable_data(self, tmp_path, capsys):
+        """Locked / password-protected notes have encrypted ZICNOTEDATA. From the
+        decoder's point of view that's just garbage bytes — should hit the same
+        warn-and-skip path."""
+        db_path = tmp_path / "NoteStore.sqlite"
+        b = create_test_db(db_path)
+        b.add_account(pk=1, name="iCloud")
+        b.add_folder(pk=10, title="Notes", account_pk=1,
+                     identifier="folder-10", sort_order=1, folder_type=0)
+        b.add_note(pk=100, title="Encrypted Note", folder_pk=10, identifier="uuid-100",
+                   creation_ts=700000000.0, mod_ts=700000000.0)
+        # Garbage data: looks like the column has content but it's not valid
+        # gzipped protobuf — exactly what an encrypted note presents to the reader.
+        b.add_note_data(note_pk=100, data=b"\x00not\x00really\x00gzipped\x00")
+        b.build()
+
+        target = tmp_path / "vault"
+        target.mkdir()
+        sync.run(target, db_path=db_path)
+
+        err = capsys.readouterr().err
+        assert "Encrypted Note" in err
+        assert "iCloud" in err
+        # The note isn't written and the run completes cleanly.
+        assert list(target.rglob("*.md")) == []
+        # And the vault still gets its config file (no abort before §9 step).
+        assert (target / ".obsidian" / "app.json").is_file()
 
 
 # ---------- gallery: forbidden chars in child titles get fullwidth in wikilinks ----------

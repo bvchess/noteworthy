@@ -638,7 +638,7 @@ class TestIncrementalSyncRoundtrip(SyncTestCase):
         noteworthy._sync_account(apple_account, None)
         self.assertEqual(mock_make_copy.call_count, 1)
 
-        # Read back local metadata (simulates what _make_copies does on next run)
+        # Read back local metadata (simulates what _make_backup_copies does on next run)
         local_accounts = read_distributed_metadata(self.target_path)
         self.assertEqual(len(local_accounts), 1)
         local_account = local_accounts[0]

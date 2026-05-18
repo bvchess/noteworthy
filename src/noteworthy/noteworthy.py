@@ -11,6 +11,8 @@ from noteworthy.notes_datatypes import (
     Folder, Note, Account, write_metadata_file, read_distributed_metadata
 )
 from noteworthy.viewer import install_viewer
+from noteworthy.obsidian import sync as obsidian_sync
+from noteworthy.obsidian.target_state import TargetState, inspect as inspect_target
 
 __all__ = ["make_copies"]
 
@@ -37,6 +39,12 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
         "-v", "--verbose",
         action="store_true",
         help="Print detailed information about each note being exported"
+    )
+    parser.add_argument(
+        "--obsidian",
+        action="store_true",
+        help="Export as an Obsidian vault (wikilinks, frontmatter Properties, flat note files) "
+             "instead of the default backup layout"
     )
     return parser.parse_args(args)
 
@@ -290,7 +298,7 @@ def _update_copy(local_copy_accounts: list[Account], apple_notes_accounts: list[
                 _counts["deleted"] += 1
 
 
-def _make_copies():
+def _make_backup_copies():
     print("  loading existing copy")
 
     # Try distributed metadata first, fall back to legacy single file
@@ -322,14 +330,59 @@ def _make_copies():
     install_viewer(_target_path)
 
 
+_OBSIDIAN_WITHOUT_FLAG_MSG = (
+    "error: target looks like an Obsidian vault but --obsidian was not specified. "
+    "Re-run with --obsidian, or choose a different target."
+)
+_BACKUP_WITH_OBSIDIAN_FLAG_MSG = (
+    "error: target contains a backup-mode export. --obsidian would corrupt it. "
+    "Re-run without --obsidian, or choose a different target."
+)
+_UNRELATED_TARGET_MSG = (
+    "error: target directory is not empty and contains no recognized export markers. "
+    "Choose an empty directory or an existing Noteworthy/Obsidian export target."
+)
+
+
+def _enforce_mode_state_compatibility(target_path: pathlib.Path, obsidian: bool) -> None:
+    """Refuse mode/state combinations that would corrupt an existing export.
+
+    See obsidian_requirements.md §11.1 for the full behavior table.
+    """
+    try:
+        state = inspect_target(target_path)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if state is TargetState.OBSIDIAN and not obsidian:
+        print(_OBSIDIAN_WITHOUT_FLAG_MSG, file=sys.stderr)
+        sys.exit(1)
+    if state is TargetState.BACKUP and obsidian:
+        print(_BACKUP_WITH_OBSIDIAN_FLAG_MSG, file=sys.stderr)
+        sys.exit(1)
+    if state is TargetState.UNRELATED:
+        print(_UNRELATED_TARGET_MSG, file=sys.stderr)
+        sys.exit(1)
+
+
 def make_copies(args: list[str], db_path: pathlib.Path = None) -> None:
     global _verbose, _db_path
+    parsed = _parse_args(args)
+    target_path = pathlib.Path(parsed.target_directory)
+
+    _enforce_mode_state_compatibility(target_path, parsed.obsidian)
+
+    if parsed.obsidian:
+        obsidian_sync.run(target_path, db_path=db_path, verbose=parsed.verbose)
+        return
+
+    # Backup mode (existing behavior).
     try:
-        parsed = _parse_args(args)
         _verbose = parsed.verbose
         _db_path = db_path
-        _set_target_path(pathlib.Path(parsed.target_directory))
-        _make_copies()
+        _set_target_path(target_path)
+        _make_backup_copies()
     except CopyError as e:
         print(f"error: {e}")
 

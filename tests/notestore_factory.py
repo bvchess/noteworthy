@@ -340,6 +340,45 @@ def build_crdt_with_uuids(uuids: list[str]) -> bytes:
     return gzip.compress(outer)
 
 
+def build_note_protobuf(parts: list) -> bytes:
+    """Build a gzipped NoteStoreProto containing a Note with the given run sequence.
+
+    Each part is either:
+      - a `str`, contributing that text as a single AttributeRun (length = UTF-16 code units)
+      - a `(str, str)` tuple `(attachment_uuid, type_uti)`, contributing one OBJECT
+        REPLACEMENT CHARACTER (U+FFFC) with an AttributeRun whose `attachment_info`
+        carries those fields
+
+    The returned bytes can be fed directly to `NoteStoreBuilder.add_note_data`.
+    Useful for tests that need a note body referencing specific attachment UUIDs
+    instead of relying on the captured-from-Apple-Notes fixtures.
+    """
+    # Lazy import: notestore_pb2 is only needed here and pulls in protobuf.
+    from noteworthy.notestore_pb2 import NoteStoreProto
+
+    note_store = NoteStoreProto()
+    note_store.document.version = 2
+    note = note_store.document.note
+
+    text_chunks: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            text_chunks.append(part)
+            run = note.attribute_run.add()
+            # AttributeRun.length counts UTF-16 code units (matches Apple Notes encoding).
+            run.length = len(part.encode("utf-16-le")) // 2
+        else:
+            uuid, type_uti = part
+            text_chunks.append("￼")
+            run = note.attribute_run.add()
+            run.length = 1
+            run.attachment_info.attachment_identifier = uuid
+            run.attachment_info.type_uti = type_uti
+
+    note.note_text = "".join(text_chunks)
+    return gzip.compress(note_store.SerializeToString())
+
+
 def create_test_db(db_path: Path, db_uuid: str = "TEST-UUID-0000-0000-000000000000") -> NoteStoreBuilder:
     """Create a test database with schema and return a builder.
 

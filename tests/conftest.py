@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import List, Dict, Any
 from dataclasses import dataclass
 
-from notestore_factory import create_test_db, load_fixture_bytes, load_fixture_attachment_table_data, build_crdt_with_uuids
+from notestore_factory import (
+    build_crdt_with_uuids,
+    build_note_protobuf,
+    create_test_db,
+    load_fixture_attachment_table_data,
+    load_fixture_bytes,
+)
 
 
 TEST_DATA_DIR = Path(__file__).parent / "test_data"
@@ -93,9 +99,20 @@ def notestore_db(tmp_path):
     # NULL-title note (should be excluded by queries)
     builder.add_note(pk=199, title=None, folder_pk=10, identifier="aaa-bbb-ccc-199")
 
-    # Note data (use real protobuf from fixtures)
-    note_data_bytes = load_fixture_bytes("TEST_NOTE", "note_data")
-    builder.add_note_data(note_pk=100, data=note_data_bytes)
+    # First Note's body: synthesized so the embedded attachment UUIDs match the
+    # records this conftest adds below (pk=400 photo, pk=401 pdf, pk=450 link to
+    # Second Note). The captured TEST_NOTE fixture references unrelated UUIDs and
+    # would render as `[Attachment: ...]` placeholders.
+    first_note_data = build_note_protobuf([
+        "Here is an image:\n",
+        ("att-uuid-400", "public.jpeg"),
+        "\nAnd a document:\n",
+        ("att-uuid-401", "com.adobe.pdf"),
+        "\nSee also: ",
+        ("link-aaa-bbb-ccc-ddd", "com.apple.notes.inlinetextattachment.link"),
+        "\n",
+    ])
+    builder.add_note_data(note_pk=100, data=first_note_data)
 
     day_planner_data = load_fixture_bytes("DAY_PLANNER", "note_data")
     builder.add_note_data(note_pk=101, data=day_planner_data)

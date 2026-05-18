@@ -1023,7 +1023,7 @@ class MarkdownGenerator:
             if target_uuid:
                 target_path = self.note_path_by_uuid.get(target_uuid.upper())
                 if target_path:
-                    target_filename = target_path.name  # filename without .md extension
+                    target_filename = target_path.stem  # drop the `.md`
 
         if target_filename:
             return format_internote_link(target_filename, display=linked_note_name)

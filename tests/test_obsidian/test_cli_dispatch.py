@@ -128,14 +128,12 @@ class TestModeStateMismatch:
         assert spy.obsidian_called is False
 
 
-class TestObsidianSyncStub:
-    """The Stage 1 stub should be importable and callable without doing real work."""
+class TestObsidianSyncModule:
+    """The sync module exposes a `run` entry point."""
 
     def test_obsidian_sync_module_importable(self):
         from noteworthy.obsidian import sync  # noqa: F401
 
-    def test_obsidian_sync_run_is_callable(self, tmp_path, capsys):
+    def test_obsidian_sync_run_attribute_callable(self):
         from noteworthy.obsidian import sync
-        sync.run(tmp_path)
-        captured = capsys.readouterr()
-        assert "not yet implemented" in captured.out.lower()
+        assert callable(sync.run)

@@ -57,7 +57,10 @@ class TestMakeMarkdownCopy:
     def test_stale_attachments_removed_on_update(self, notestore_db, tmp_path):
         """Test that old attachments are removed when a note is updated."""
         note_dir = tmp_path / "test_note"
-        note_id = "x-coredata://TEST-UUID-0000-0000-000000000000/ICNote/p100"
+        # Personal Stuff (pk=103) uses the FORMATTING_BOUNDARY fixture which has
+        # no attachment references, so the directory-pruning assertion below is
+        # not confounded by real attachments getting written.
+        note_id = "x-coredata://TEST-UUID-0000-0000-000000000000/ICNote/p103"
 
         # First export
         make_markdown_copy(note_id, note_dir, db_path=notestore_db)

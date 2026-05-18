@@ -17,6 +17,12 @@ from typing import List, Optional, Tuple
 
 from .notestore_pb2 import MergableDataProto
 from .note_content import TableData, Attachment, ContentBlock, ProtobufDecoder
+from .obsidian.dialect import (
+    ExportDialect,
+    format_internote_link,
+    format_attachment_ref,
+    strip_title_block,
+)
 
 
 # UTIs that represent image formats (rendered inline with ![]() syntax)
@@ -366,14 +372,31 @@ class InlineFormattingState:
     )
 
     @classmethod
-    def from_block(cls, block: ContentBlock) -> 'InlineFormattingState':
-        """Create formatting state from a content block."""
+    def from_block(cls, block: ContentBlock,
+                   dialect: 'ExportDialect' = None) -> 'InlineFormattingState':
+        """Create formatting state from a content block.
+
+        In OBSIDIAN dialect, underline has no native syntax, so we fold it into
+        highlight (`==`) — the closest visual analog — and never set underline=True.
+        That also means underline + highlight on the same text collapse to a single
+        `==text==` instead of producing `====` artifacts. Per requirements §6.2.
+        """
+        # Late import to avoid circularity at module load time.
+        if dialect is None:
+            dialect = ExportDialect.BACKUP
+
+        underline = block.underlined
+        highlight = block.emphasis_color is not None
+        if dialect is ExportDialect.OBSIDIAN:
+            highlight = highlight or underline
+            underline = False
+
         return cls(
             bold=block.bold,
             italic=block.italic,
             strikethrough=block.strikethrough,
-            underline=block.underlined,
-            highlight=block.emphasis_color is not None,
+            underline=underline,
+            highlight=highlight,
             link=block.link,
         )
 
@@ -418,10 +441,18 @@ class MarkdownGenerator:
     _STYLES_WITHOUT_INLINE_BREAK_FORMATTING = {'monospaced', 'bullet', 'dashed', 'numbered', 'checklist'}
 
     def __init__(self, attachment_resolver: AttachmentResolver, note_path_by_uuid: dict = None,
-                 current_note_path: Path = None):
+                 current_note_path: Path = None,
+                 *,
+                 dialect: ExportDialect = ExportDialect.BACKUP,
+                 note_name: str | None = None):
         self.attachment_resolver = attachment_resolver
         self.note_path_by_uuid = note_path_by_uuid or {}
         self.current_note_path = current_note_path
+        # Dialect controls a handful of branch sites: inter-note link form,
+        # attachment-ref form, and title-line stripping. `note_name` is required
+        # for the title-strip pass and is otherwise unused.
+        self.dialect = dialect
+        self.note_name = note_name
 
     @staticmethod
     def _is_monospaced_text(block: ContentBlock) -> bool:
@@ -565,6 +596,12 @@ class MarkdownGenerator:
         """
         blocks = self._merge_consecutive_monospaced(blocks)
 
+        # In Obsidian, the note title comes from the filename rather than the body.
+        # If the first non-empty block restates the title, drop it to avoid the
+        # duplicate-heading effect users would otherwise see (§6.1).
+        if self.dialect is ExportDialect.OBSIDIAN and self.note_name:
+            blocks = strip_title_block(blocks, self.note_name)
+
         output_parts: List[str] = []
         current_fmt = InlineFormattingState()
         no_formatting = InlineFormattingState()
@@ -583,7 +620,7 @@ class MarkdownGenerator:
                 if block.text and not block.text.strip():
                     block_fmt = InlineFormattingState()
                 else:
-                    block_fmt = InlineFormattingState.from_block(block)
+                    block_fmt = InlineFormattingState.from_block(block, dialect=self.dialect)
 
                 # Update numbered list counter
                 if block.style == 'numbered':
@@ -952,6 +989,46 @@ class MarkdownGenerator:
         # URL-encode the path
         return urllib.parse.quote(rel_path)
 
+    def _format_internote_link_backup(self, attachment, linked_note_name: str) -> str:
+        """Backup-mode inter-note link: relative markdown link to the target's .md file.
+
+        Resolves via `note_path_by_uuid` when possible (preferred — uses the actual
+        on-disk path) and falls back to a guessed `../Name/Name.md` shape when the
+        link can't be resolved.
+        """
+        if attachment.token_content_identifier and self.note_path_by_uuid and self.current_note_path:
+            target_uuid = self._parse_note_uuid_from_token(attachment.token_content_identifier)
+            if target_uuid:
+                target_path = self.note_path_by_uuid.get(target_uuid.upper())
+                if target_path:
+                    relative_path = self._compute_relative_note_path(self.current_note_path, target_path)
+                    return f"[{linked_note_name}]({relative_path})"
+
+        # Fallback when the target can't be resolved — guess the path from the display name.
+        sanitized_name = self._sanitize_name_for_path(linked_note_name)
+        encoded_path = urllib.parse.quote(f"../{sanitized_name}/{sanitized_name}.md")
+        return f"[{linked_note_name}]({encoded_path})"
+
+    def _format_internote_link_obsidian(self, attachment, linked_note_name: str) -> str:
+        """Obsidian-mode inter-note link: `[[Target]]` or `[[target|display]]`.
+
+        The wikilink target is the resolved note's on-disk filename (without `.md`).
+        When the link can't be resolved, we still emit `[[linked_note_name]]` so
+        Obsidian renders it as a (distinctly-colored) unresolved link — surfacing
+        the gap to the user instead of silently flattening it to plain text.
+        """
+        target_filename: str | None = None
+        if attachment.token_content_identifier and self.note_path_by_uuid:
+            target_uuid = self._parse_note_uuid_from_token(attachment.token_content_identifier)
+            if target_uuid:
+                target_path = self.note_path_by_uuid.get(target_uuid.upper())
+                if target_path:
+                    target_filename = target_path.name  # filename without .md extension
+
+        if target_filename:
+            return format_internote_link(target_filename, display=linked_note_name)
+        return format_internote_link(linked_note_name)
+
     def _format_attachment(self, block: ContentBlock) -> str:
         """Format an attachment as markdown."""
         if not block.attachment:
@@ -976,25 +1053,17 @@ class MarkdownGenerator:
             if not attachment.alt_text:
                 self.attachment_resolver.resolve_attachment(attachment)
 
-            if attachment.alt_text:
-                linked_note_name = attachment.alt_text
-
-                # Try to resolve using pre-computed note paths via token_content_identifier
-                if attachment.token_content_identifier and self.note_path_by_uuid and self.current_note_path:
-                    target_uuid = self._parse_note_uuid_from_token(attachment.token_content_identifier)
-                    if target_uuid:
-                        target_path = self.note_path_by_uuid.get(target_uuid.upper())
-                        if target_path:
-                            # Compute relative path from current note to target note
-                            relative_path = self._compute_relative_note_path(self.current_note_path, target_path)
-                            return f"[{linked_note_name}]({relative_path})"
-
-                # Fallback to display name if lookup fails
-                sanitized_name = self._sanitize_name_for_path(linked_note_name)
-                encoded_path = urllib.parse.quote(f"../{sanitized_name}/{sanitized_name}.md")
-                return f"[{linked_note_name}]({encoded_path})"
-            else:
+            if not attachment.alt_text:
                 return f"[Link: {attachment.uuid}]"
+
+            linked_note_name = attachment.alt_text
+
+            # Each dialect formats inter-note links differently. Keep the two
+            # branches isolated in their own helpers so the high-level flow above
+            # stays readable.
+            if self.dialect is ExportDialect.OBSIDIAN:
+                return self._format_internote_link_obsidian(attachment, linked_note_name)
+            return self._format_internote_link_backup(attachment, linked_note_name)
 
         # Check if it's a hashtag inline attachment
         if 'hashtag' in attachment.type:
@@ -1023,10 +1092,12 @@ class MarkdownGenerator:
                     else:
                         sanitized_filename = self._sanitize_name_for_path(child.title or child.uuid[:8])
 
+                    if self.dialect is ExportDialect.OBSIDIAN:
+                        lines.append(f"{format_attachment_ref(sanitized_filename)}  ")
+                        continue
+
                     encoded_filename = urllib.parse.quote(sanitized_filename)
                     apple_path = f"Attachments/{encoded_filename}"
-
-                    # Check if it's an image
                     if child.type and ('image' in child.type or 'jpeg' in child.type or 'png' in child.type):
                         lines.append(f"![{child.title or 'Image'}]({apple_path})  ")
                     else:
@@ -1050,15 +1121,18 @@ class MarkdownGenerator:
         else:
             sanitized_filename = self._sanitize_name_for_path(attachment.title)
 
-        # URL-encode for the path
+        # Obsidian-mode attachments live in a flat top-level assets/ directory and
+        # are referenced by `![[name.ext]]` (images) or `[[name.ext]]` (everything
+        # else). The extension-based decision lives in obsidian.dialect.
+        if self.dialect is ExportDialect.OBSIDIAN:
+            return f"{format_attachment_ref(sanitized_filename)}  \n"
+
+        # Backup-mode attachments live next to the note in an Attachments/ subdir.
         encoded_filename = urllib.parse.quote(sanitized_filename)
         apple_path = f"Attachments/{encoded_filename}"
-
-        # Check if it's an image - add trailing spaces to match Apple's format
         if attachment.type in IMAGE_UTIS:
             return f"![{attachment.title}]({apple_path})  \n"
-        else:
-            return f"[{attachment.title}]({apple_path})  \n"
+        return f"[{attachment.title}]({apple_path})  \n"
 
     def _render_table_markdown(self, table_data: TableData) -> str:
         """Render a TableData object as a markdown table."""
@@ -1080,7 +1154,9 @@ class NoteExporter:
     """Main exporter class that coordinates the export process."""
 
     def __init__(self, data_loader, verbose: bool = False, note_path_by_uuid: dict = None,
-                 current_note_path: Path = None, note_name: str = None, note_uuid: str = None):
+                 current_note_path: Path = None, note_name: str = None, note_uuid: str = None,
+                 *,
+                 dialect: ExportDialect = ExportDialect.BACKUP):
         """
         Initialize note exporter.
 
@@ -1098,7 +1174,10 @@ class NoteExporter:
         self.verbose = verbose
         self.decoder = ProtobufDecoder()
         self.attachment_resolver = AttachmentResolver(data_loader, note_name=note_name, note_uuid=note_uuid)
-        self.markdown_generator = MarkdownGenerator(self.attachment_resolver, note_path_by_uuid, current_note_path)
+        self.markdown_generator = MarkdownGenerator(
+            self.attachment_resolver, note_path_by_uuid, current_note_path,
+            dialect=dialect, note_name=note_name,
+        )
 
     def export_note(self, note_id: int, output_path: str) -> Tuple[str, List[Attachment]]:
         """

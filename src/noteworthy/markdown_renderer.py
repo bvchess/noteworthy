@@ -23,6 +23,7 @@ from .obsidian.dialect import (
     format_attachment_ref,
     strip_title_block,
 )
+from .obsidian.filename import sanitize_for_obsidian
 
 
 # UTIs that represent image formats (rendered inline with ![]() syntax)
@@ -373,7 +374,7 @@ class InlineFormattingState:
 
     @classmethod
     def from_block(cls, block: ContentBlock,
-                   dialect: 'ExportDialect' = None) -> 'InlineFormattingState':
+                   dialect: ExportDialect = ExportDialect.BACKUP) -> 'InlineFormattingState':
         """Create formatting state from a content block.
 
         In OBSIDIAN dialect, underline has no native syntax, so we fold it into
@@ -381,10 +382,6 @@ class InlineFormattingState:
         That also means underline + highlight on the same text collapse to a single
         `==text==` instead of producing `====` artifacts. Per requirements §6.2.
         """
-        # Late import to avoid circularity at module load time.
-        if dialect is None:
-            dialect = ExportDialect.BACKUP
-
         underline = block.underlined
         highlight = block.emphasis_color is not None
         if dialect is ExportDialect.OBSIDIAN:
@@ -1089,6 +1086,11 @@ class MarkdownGenerator:
                 for child in attachment.gallery_children:
                     if child.unique_filename:
                         sanitized_filename = child.unique_filename
+                    elif self.dialect is ExportDialect.OBSIDIAN:
+                        # Obsidian wikilinks can't contain # | ^ [ ] — fall back to
+                        # the Obsidian-aware sanitizer so forbidden chars get fullwidth
+                        # look-alikes instead of leaking into the [[...]] target.
+                        sanitized_filename = sanitize_for_obsidian(child.title or child.uuid[:8])
                     else:
                         sanitized_filename = self._sanitize_name_for_path(child.title or child.uuid[:8])
 

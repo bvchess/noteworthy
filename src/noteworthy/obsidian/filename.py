@@ -65,7 +65,8 @@ def assign_unique_names(
         candidates: iterable of (key, name) pairs in the order the caller wants
             collisions broken — the first occurrence keeps its bare name, later
             duplicates get " (2)", " (3)", … suffixes. Comparison is case-insensitive
-            to match macOS's default case-insensitive filesystem.
+            (via Unicode casefold) to match macOS's default case-insensitive
+            filesystem and to handle non-ASCII names correctly.
         has_extensions: if True, the suffix is inserted before the last `.` so
             `photo.jpg` collides with another `photo.jpg` and becomes `photo (2).jpg`.
 
@@ -73,7 +74,7 @@ def assign_unique_names(
         Mapping from key to its final unique name. Names already unique are returned
         unchanged.
     """
-    used_lower: set[str] = set()
+    used_folded: set[str] = set()
     result: dict[Hashable, str] = {}
 
     for key, name in candidates:
@@ -84,11 +85,11 @@ def assign_unique_names(
 
         candidate = name
         counter = 2
-        while candidate.lower() in used_lower:
+        while candidate.casefold() in used_folded:
             candidate = f"{stem} ({counter}){ext}"
             counter += 1
 
-        used_lower.add(candidate.lower())
+        used_folded.add(candidate.casefold())
         result[key] = candidate
 
     return result

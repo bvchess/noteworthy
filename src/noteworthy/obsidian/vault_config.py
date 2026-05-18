@@ -31,15 +31,14 @@ def ensure_app_json(target_path: pathlib.Path) -> None:
     """Create `<target>/.obsidian/app.json` if it doesn't already exist.
 
     Existing app.json files are left untouched (the user may have customized
-    them), and other files in `.obsidian/` are never read or modified. The
-    target directory itself is created if missing.
+    them), and other files in `.obsidian/` are never read or modified. When
+    the file is already present this function does nothing — including not
+    re-creating `.obsidian/` — so the second run leaves zero mtime churn.
     """
     target_path = pathlib.Path(target_path)
-    obsidian_dir = target_path / ".obsidian"
-    obsidian_dir.mkdir(parents=True, exist_ok=True)
-
-    app_json = obsidian_dir / "app.json"
+    app_json = target_path / ".obsidian" / "app.json"
     if app_json.exists():
         return  # respect whatever the user (or a prior run) put there
 
+    app_json.parent.mkdir(parents=True, exist_ok=True)
     app_json.write_text(json.dumps(_APP_JSON_DEFAULTS, indent=2) + "\n", encoding="utf-8")

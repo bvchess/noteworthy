@@ -22,10 +22,13 @@ for stage-by-stage rationale.
 
 from __future__ import annotations
 
+import os
 import pathlib
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -49,21 +52,34 @@ __all__ = ["run"]
 
 _DEFAULT_DB = Path.home() / "Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 
+# Sentinel used when a note has no creation_date so the sort key stays totally
+# ordered. tz-aware to match the (tz-aware) datetimes Apple Notes produces.
+_MIN_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
+
 
 # ---------- planning data structures ----------
 
 
 @dataclass
 class _NoteLayout:
-    """Where a single note will live in the vault.
+    """Where a single note will live in the vault, plus the context the renderer needs.
 
     `folder_dirs` is the tuple of directory names from the vault root down to the
     note's immediate parent folder (account dir first when multi-account, then the
     Apple Notes folder hierarchy). `filename` is the on-disk basename without the
     `.md` extension — used both for the file path and as the wikilink target.
+    `account` and `folder_path_in_account` are pre-computed so frontmatter
+    rendering doesn't have to walk parents at write time.
+
+    `aliases` carries any names the user might still type for this note in
+    Obsidian's quick switcher — the original display name when sanitization or
+    disambiguation changed the on-disk filename (requirements §5.1).
     """
     folder_dirs: tuple[str, ...]
     filename: str
+    account: Account
+    folder_path_in_account: str
+    aliases: list[str] = field(default_factory=list)
 
     @property
     def relative_path(self) -> Path:
@@ -102,8 +118,7 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
             for d in decoded if d.note.uuid
         }
 
-        _write_notes(decoded, layout, target_path, note_path_by_uuid, data_loader,
-                     accounts_with_content, flatten_account)
+        _write_notes(decoded, layout, target_path, note_path_by_uuid, data_loader)
         _copy_attachments(decoded, target_path)
     finally:
         data_loader.close()
@@ -146,31 +161,48 @@ def _build_note_layout(accounts: list[Account], flatten_account: bool) -> dict[N
 
     Filenames are resolved vault-wide for uniqueness, sorted by (creation_date, id)
     so the order is deterministic and a re-run won't shuffle which note keeps the
-    bare name vs gets a " (2)" suffix.
+    bare name vs gets a " (2)" suffix. Notes without a UUID are dropped here
+    (with a stderr warning) because the spec requires `apple_notes_uuid` for
+    re-export round-tripping.
     """
     # Step 1: collect (note, candidate_basename, folder_chain, account) tuples.
+    # Notes without a UUID are skipped with a warning — see §11.2: identity is
+    # established by apple_notes_uuid, so an entry without one couldn't be
+    # matched on re-export and would orphan with every run.
     candidates: list[tuple[Note, str, tuple[Folder, ...], Account]] = []
     for account in accounts:
         for note, chain in _iter_real_notes(account):
+            if not note.uuid:
+                _warn_skipped_note(note, account.name, "no apple_notes_uuid available")
+                continue
             candidates.append((note, sanitize_for_obsidian(note.name), chain, account))
 
     # Step 2: sort by (creation_date, id) so the earliest note keeps its bare name.
-    candidates.sort(key=lambda t: (t[0].creation_date, t[0].id))
+    # Notes with a missing creation_date sort first (sentinel below) so the
+    # comparison never hits a NoneType vs datetime TypeError on bad data. The
+    # sentinel is tz-aware because the real creation_date is tz-aware.
+    candidates.sort(key=lambda t: (t[0].creation_date or _MIN_DATETIME, t[0].id))
 
-    # Step 3: vault-wide uniqueness pass over the candidate filenames.
-    # Use positional indices as keys — Note isn't a dataclass so identity-hashing
-    # would work, but indices keep this symmetric with the Attachment pass.
+    # Step 3: vault-wide uniqueness pass over the candidate filenames. Indices
+    # serve as keys so callers don't have to find a stable hash for `Note`
+    # (whose hash walks `_folders`, which would be wasteful here).
     final_names = assign_unique_names(
         [(i, name) for i, (_note, name, _chain, _acc) in enumerate(candidates)],
         has_extensions=False,
     )
 
-    # Step 4: assemble the per-note layout.
+    # Step 4: assemble the per-note layout, populating aliases when sanitization
+    # or disambiguation changed the on-disk name (requirements §5.1).
     layout: dict[Note, _NoteLayout] = {}
     for i, (note, _candidate, chain, account) in enumerate(candidates):
+        filename = final_names[i]
+        aliases = [note.name] if note.name and note.name != filename else []
         layout[note] = _NoteLayout(
             folder_dirs=_folder_dirs_for(account, chain, flatten_account=flatten_account),
-            filename=final_names[i],
+            filename=filename,
+            account=account,
+            folder_path_in_account="/".join(f.name for f in chain),
+            aliases=aliases,
         )
     return layout
 
@@ -193,20 +225,21 @@ def _decode_all_notes(
     decoder = ProtobufDecoder()
     decoded: list[_DecodedNote] = []
 
-    for note in layout:
+    for note, plan in layout.items():
+        account_name = plan.account.name
         zpk = _zpk_from_core_data_id(note.id)
         if zpk is None:
-            _warn_skipped_note(note, "could not parse note id")
+            _warn_skipped_note(note, account_name, "could not parse note id")
             continue
         try:
             compressed = data_loader.get_note_data(zpk)
         except Exception as exc:
-            _warn_skipped_note(note, f"could not read note data ({exc})")
+            _warn_skipped_note(note, account_name, f"could not read note data ({exc})")
             continue
         try:
             blocks = decoder.decode_note(compressed)
         except Exception as exc:
-            _warn_skipped_note(note, f"could not decode note body ({exc})")
+            _warn_skipped_note(note, account_name, f"could not decode note body ({exc})")
             continue
 
         resolver = AttachmentResolver(data_loader, note_name=note.name, note_uuid=note.uuid)
@@ -216,20 +249,27 @@ def _decode_all_notes(
     return decoded
 
 
+_CORE_DATA_PK_RE = re.compile(r"/p(\d+)$")
+
+
 def _zpk_from_core_data_id(note_id: str) -> int | None:
     """Extract the trailing `p<digits>` integer from a Core Data URI."""
-    import re
-    m = re.search(r"/p(\d+)$", note_id)
+    m = _CORE_DATA_PK_RE.search(note_id)
     return int(m.group(1)) if m else None
 
 
-def _warn_skipped_note(note: Note, reason: str) -> None:
+def _warn_skipped_note(note: Note, account_name: str, reason: str) -> None:
     """Emit a single-line stderr warning explaining why a note was skipped.
 
-    Matches the §10 "warn then skip" rule for locked notes; we use the same path
-    for any other unreadable note so the user always learns what was lost.
+    Per §10, the warning includes both the note name AND the account so the user
+    can find the note in Apple Notes to investigate. Used for locked / encrypted
+    notes (the §10 case) and for any other unreadable note so nothing is lost
+    silently.
     """
-    print(f"warning: skipping note {note.name!r} ({reason})", file=sys.stderr)
+    print(
+        f"warning: skipping note {note.name!r} in account {account_name!r} ({reason})",
+        file=sys.stderr,
+    )
 
 
 def _resolve_attachment_metadata(blocks: list[ContentBlock], resolver: AttachmentResolver) -> list[Attachment]:
@@ -262,12 +302,11 @@ def _resolve_attachment_metadata(blocks: list[ContentBlock], resolver: Attachmen
 # ---------- step 4: vault-wide attachment filenames ----------
 
 
-_KNOWN_EXTENSIONS = frozenset({
-    ".jpg", ".jpeg", ".png", ".gif", ".tiff", ".tif", ".heic", ".heif",
-    ".webp", ".avif", ".bmp", ".svg", ".pdf", ".txt", ".rtf", ".html",
-    ".json", ".xml", ".mov", ".mp4", ".avi", ".mp3", ".m4a", ".doc",
-    ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".eml", ".vcf",
-})
+# The set of extensions the candidate-filename pass recognizes as "already has
+# one, leave it alone." Derived from the canonical UTI map so the two sources
+# can't drift; .tif/.jpeg are added as recognized spellings missing from the
+# UTI table.
+_KNOWN_EXTENSIONS = frozenset(UTI_TO_EXTENSION.values()) | {".tif", ".jpeg"}
 
 
 def _candidate_attachment_filename(att: Attachment) -> str:
@@ -280,7 +319,6 @@ def _candidate_attachment_filename(att: Attachment) -> str:
     the UUID prefix as a last resort. Extension is inferred from the UTI when the
     chosen base has none.
     """
-    import os
     base = ""
     if att.file_path:
         base = os.path.basename(att.file_path)
@@ -320,19 +358,20 @@ def _write_notes(
     target_path: Path,
     note_path_by_uuid: dict[str, Path],
     data_loader: DatabaseNoteDataLoader,
-    accounts: list[Account],
-    flatten_account: bool,
 ) -> None:
     """Render each note's markdown and write `frontmatter + body` to its planned path."""
-    account_by_id = {acc.id: acc for acc in accounts}
-
     for d in decoded_notes:
         plan = layout[d.note]
         md_path = target_path / plan.relative_path
         md_path.parent.mkdir(parents=True, exist_ok=True)
 
         body = _render_body(d, md_path, note_path_by_uuid, data_loader)
-        fm = _render_frontmatter(d.note, account_by_id, flatten_account)
+        fm = frontmatter.render(
+            d.note,
+            account_name=plan.account.name,
+            folder_path=plan.folder_path_in_account,
+            aliases=plan.aliases,
+        )
 
         md_path.write_text(fm + body, encoding="utf-8")
 
@@ -353,57 +392,6 @@ def _render_body(
         note_name=decoded.note.name,
     )
     return generator.generate(decoded.blocks)
-
-
-def _render_frontmatter(note: Note, account_by_id: dict[str, Account], flatten_account: bool) -> str:
-    """Build the YAML frontmatter block for a note."""
-    home = note.home_folder
-    account = account_by_id.get(home.parent.id) if home and home.parent else None
-    # Fall back: a note's home folder may itself be a top-level folder whose parent
-    # is the Account (not in account_by_id keyed by folder ids). Walk up the chain.
-    if account is None:
-        account = _find_owning_account(note, account_by_id)
-
-    folder_path = _folder_full_name(note)
-    aliases: list[str] = []  # Stage 5 populates from disambiguation/sanitization
-    return frontmatter.render(
-        note,
-        account_name=account.name if account else "",
-        folder_path=folder_path,
-        aliases=aliases,
-    )
-
-
-def _find_owning_account(note: Note, account_by_id: dict[str, Account]) -> Account | None:
-    """Return the Account that ultimately contains `note`'s home folder."""
-    home = note.home_folder
-    if not home:
-        return None
-    cur = home
-    while cur.parent is not None and not isinstance(cur.parent, Account):
-        cur = cur.parent
-    return cur.parent if isinstance(cur.parent, Account) else None
-
-
-def _folder_full_name(note: Note) -> str:
-    """Slash-joined folder path for the note within its account, e.g. `Work/Personal`.
-
-    `Folder.full_name` includes the account name as its outermost segment; the
-    spec wants the account-relative path, so we walk up from `home_folder` to
-    just below the Account and join those folder names.
-
-    Returns an empty string for notes that sit at the account root.
-    """
-    home = note.home_folder
-    if not home:
-        return ""
-    chain: list[str] = []
-    cur = home
-    while cur is not None and not isinstance(cur, Account):
-        chain.append(cur.name)
-        cur = cur.parent
-    chain.reverse()
-    return "/".join(chain)
 
 
 # ---------- step 7: copy attachments ----------

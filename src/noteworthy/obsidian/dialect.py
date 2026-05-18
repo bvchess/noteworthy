@@ -83,20 +83,23 @@ def strip_title_block(blocks: List[ContentBlock], note_name: str | None) -> List
     heading prefix and `**bold**` markers are added at render time), so the
     comparison handles plain, heading-styled, and bold-styled title lines uniformly.
 
-    Empty/whitespace-only leading blocks are preserved; only the first non-empty
-    one is considered.
+    Empty/whitespace-only leading TEXT blocks are skipped over (Apple Notes can
+    serialize a leading blank line). An attachment is *not* skipped — if it is
+    the first content block, the body's "first content" is the attachment, not
+    the title, so we leave the body alone per §6.1's "doesn't match → preserve."
     """
     if not blocks or not note_name:
         return blocks
 
-    target = note_name.strip().lower()
+    target = note_name.strip().casefold()
     for i, block in enumerate(blocks):
-        if block.type != "text" or not (block.text and block.text.strip()):
-            # Skip empty leading blocks (text or attachment); they don't anchor the test.
+        if block.type == "text" and not (block.text and block.text.strip()):
+            # Empty leading text block — skip over it.
             continue
-        if block.text.strip().lower() == target:
+        if block.type == "text" and block.text.strip().casefold() == target:
             return blocks[:i] + blocks[i + 1:]
-        # First non-empty block didn't match — leave the body untouched.
+        # First non-empty block is either non-matching text or an attachment —
+        # leave the body untouched.
         return blocks
 
     return blocks

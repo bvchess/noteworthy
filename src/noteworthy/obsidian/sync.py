@@ -503,7 +503,15 @@ def _render_body(
 
 
 def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> None:
-    """Copy every attachment's source file into `<vault>/assets/<unique_filename>`."""
+    """Copy every attachment's source file into `<vault>/assets/<unique_filename>`.
+
+    Skips the copy when an existing dest file already matches the source by
+    size and isn't older than it. shutil.copy2 preserves source mtime, so a
+    re-export over an unchanged source produces (src.size == dest.size,
+    src.mtime == dest.mtime) and the rewrite is avoided — important for
+    cloud-synced vaults (iCloud Drive / Dropbox / Obsidian Sync) where any
+    inode touch triggers an upload.
+    """
     assets_dir = target_path / "assets"
     assets_dir.mkdir(exist_ok=True)
     for d in decoded_notes:
@@ -519,5 +527,28 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> N
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(src, dest)
-            else:
-                shutil.copy2(src, dest)
+                continue
+            if _dest_already_matches(src, dest):
+                continue
+            shutil.copy2(src, dest)
+
+
+def _dest_already_matches(src: Path, dest: Path) -> bool:
+    """True if `dest` already reflects `src` and a copy would be wasted work.
+
+    Size match plus dest-mtime >= src-mtime is enough in practice: shutil.copy2
+    propagates the source's mtime to dest on a successful copy, so a clean
+    re-export over an unchanged source meets both conditions. If the user
+    replaces the attachment in Apple Notes the source's mtime advances and we
+    re-copy. (A same-size replacement that somehow keeps the original mtime is
+    pathological and not worth defending against — the user would re-export
+    explicitly if they noticed staleness.)
+    """
+    if not dest.exists() or dest.is_dir():
+        return False
+    try:
+        src_stat = src.stat()
+        dest_stat = dest.stat()
+    except OSError:
+        return False
+    return src_stat.st_size == dest_stat.st_size and dest_stat.st_mtime >= src_stat.st_mtime

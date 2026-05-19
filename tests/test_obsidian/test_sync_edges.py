@@ -297,6 +297,86 @@ class TestMissingAttachmentFile:
     must not leave a half-written vault.
     """
 
+    def test_unchanged_attachment_not_recopied(self, tmp_path):
+        """Re-exporting an unchanged source must not touch existing assets.
+
+        Cloud-synced vaults (iCloud Drive / Dropbox / Obsidian Sync) treat every
+        mtime change as a new version to upload — copying an unchanged file on
+        every re-export would churn the user's sync bandwidth for nothing.
+        """
+        db_path = tmp_path / "NoteStore.sqlite"
+        b = create_test_db(db_path)
+        b.add_account(pk=1, name="iCloud")
+        b.add_folder(pk=10, title="Notes", account_pk=1,
+                     identifier="folder-10", sort_order=1, folder_type=0)
+        b.add_note(pk=100, title="Has Photo", folder_pk=10, identifier="uuid-100",
+                   creation_ts=700000000.0, mod_ts=700000000.0)
+        b.add_note_data(note_pk=100, data=build_note_protobuf([
+            ("att-uuid-400", "public.jpeg"),
+        ]))
+        b.add_media(pk=300, identifier="media-300", filename="photo.jpg", generation=None)
+        b.add_attachment(pk=400, identifier="att-uuid-400", type_uti="public.jpeg",
+                         title="Photo", media_pk=300, note_pk=100)
+        (tmp_path / "Media" / "media-300").mkdir(parents=True)
+        (tmp_path / "Media" / "media-300" / "photo.jpg").write_bytes(b"jpg-bytes")
+        b.build()
+
+        target = tmp_path / "vault"
+        target.mkdir()
+
+        sync.run(target, db_path=db_path)
+        dest = target / "assets" / "photo.jpg"
+        assert dest.is_file()
+        # ctime reflects any inode-level modification — including a same-content
+        # rewrite via shutil.copy2. mtime would be spoofed by copy2 preserving
+        # the source's mtime; ctime is what cloud sync tools and rsync actually
+        # use to detect "this file was touched."
+        ctime_first = dest.stat().st_ctime
+
+        # Sleep long enough that a real rewrite would advance ctime.
+        import time
+        time.sleep(0.05)
+
+        sync.run(target, db_path=db_path)
+        assert dest.stat().st_ctime == ctime_first, \
+            "attachment was re-copied even though source bytes are unchanged"
+
+    def test_changed_attachment_is_recopied(self, tmp_path):
+        """If the source attachment changes, the dest must update."""
+        db_path = tmp_path / "NoteStore.sqlite"
+        b = create_test_db(db_path)
+        b.add_account(pk=1, name="iCloud")
+        b.add_folder(pk=10, title="Notes", account_pk=1,
+                     identifier="folder-10", sort_order=1, folder_type=0)
+        b.add_note(pk=100, title="Has Photo", folder_pk=10, identifier="uuid-100",
+                   creation_ts=700000000.0, mod_ts=700000000.0)
+        b.add_note_data(note_pk=100, data=build_note_protobuf([
+            ("att-uuid-400", "public.jpeg"),
+        ]))
+        b.add_media(pk=300, identifier="media-300", filename="photo.jpg", generation=None)
+        b.add_attachment(pk=400, identifier="att-uuid-400", type_uti="public.jpeg",
+                         title="Photo", media_pk=300, note_pk=100)
+        media_path = tmp_path / "Media" / "media-300" / "photo.jpg"
+        media_path.parent.mkdir(parents=True)
+        media_path.write_bytes(b"original-bytes")
+        b.build()
+
+        target = tmp_path / "vault"
+        target.mkdir()
+
+        sync.run(target, db_path=db_path)
+        dest = target / "assets" / "photo.jpg"
+        assert dest.read_bytes() == b"original-bytes"
+
+        # Simulate a user replacing the attachment in Apple Notes: different
+        # bytes AND a newer mtime (which copy2 propagated as part of the first run).
+        import time
+        time.sleep(0.05)
+        media_path.write_bytes(b"replaced-bytes-of-different-length")
+
+        sync.run(target, db_path=db_path)
+        assert dest.read_bytes() == b"replaced-bytes-of-different-length"
+
     def test_missing_file_does_not_crash(self, tmp_path, capsys):
         db_path = tmp_path / "NoteStore.sqlite"
         b = create_test_db(db_path)

@@ -121,12 +121,30 @@ When more than one Apple Notes account is present (e.g. iCloud + On My Mac), fol
 
 ### Re-exporting
 
-You can run the exporter again over an existing vault and it'll update only what's changed:
+You can run the exporter again over an existing vault and it'll update only what's changed. Re-export is a true no-op when nothing in Apple Notes has changed — no files touched, no cloud-sync churn.
 
 - A note renamed in Apple Notes → the `.md` file is renamed; the old name is added to `aliases:` so old wikilinks still resolve.
 - A note moved between folders → the `.md` file relocates; path-less wikilinks survive the move.
 - A frontmatter key you added by hand (`priority: high`, custom tags, etc.) → preserved.
-- A note no longer in Apple Notes → left in place (you may have edited it).
+- A note no longer in Apple Notes → left in place (you may have edited it). No `--prune` flag yet.
+
+### What gets overwritten vs. preserved on re-export
+
+Apple Notes is the source of truth for note content — this is a one-way export, not a two-way sync. The full rules:
+
+| You edit in… | What happens on next re-export |
+| --- | --- |
+| **Obsidian: note body** | overwritten with the Apple Notes version |
+| **Obsidian: owned frontmatter keys** (`created`, `modified`, `account`, `folder`, `apple_notes_uuid`, `aliases`, `tags`) | overwritten — regenerated from the source every run |
+| **Obsidian: frontmatter keys you added** (e.g. `priority: high`, `project: foo`) | **preserved** — these survive every re-export and even survive renames/moves |
+| **Apple Notes: body** | propagates to Obsidian, overwriting any local body edits |
+| **Apple Notes: title (rename)** | file renamed in vault, old name added to `aliases:` |
+| **Apple Notes: moved between folders** | file relocated in vault; wikilinks still resolve |
+| **Apple Notes: deleted** | Obsidian file **left in place** — local edits remain. No prune. |
+| **A new note you created in Obsidian** (no `apple_notes_uuid` frontmatter) | invisible to the exporter, never touched |
+| **Same note edited in both** | Apple Notes body wins; your Obsidian custom frontmatter keys survive |
+
+**Practical workflow**: treat the vault as a queryable, linkable view of Apple Notes. Use custom frontmatter properties for vault-only metadata (priority, GTD status, project tags) — those survive. Use Apple Notes itself for body changes you want to keep.
 
 ### Target-directory safety
 

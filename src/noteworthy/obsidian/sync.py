@@ -126,6 +126,9 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
 
     layout = _build_note_layout(accounts_with_content, flatten_account, existing)
 
+    if verbose:
+        print(f"scanning: {len(accounts_with_content)} account(s), {len(layout)} note(s) to export")
+
     data_loader = DatabaseNoteDataLoader(str(db_path or _DEFAULT_DB))
     try:
         decoded = _decode_all_notes(layout, data_loader, verbose=verbose)
@@ -136,12 +139,21 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
             for d in decoded if d.note.uuid
         }
 
-        _write_notes(decoded, layout, target_path, note_path_by_uuid, data_loader, existing)
-        _copy_attachments(decoded, target_path)
+        notes_written, notes_unchanged = _write_notes(
+            decoded, layout, target_path, note_path_by_uuid, data_loader, existing,
+            verbose=verbose,
+        )
+        attachments_copied, attachments_unchanged = _copy_attachments(decoded, target_path)
     finally:
         data_loader.close()
 
     vault_config.ensure_app_json(target_path)
+
+    if verbose:
+        print(
+            f"done: {notes_written} note(s) written, {notes_unchanged} unchanged; "
+            f"{attachments_copied} attachment(s) copied, {attachments_unchanged} unchanged"
+        )
 
 
 # ---------- step 2: layout ----------
@@ -448,7 +460,9 @@ def _write_notes(
     note_path_by_uuid: dict[str, Path],
     data_loader: DatabaseNoteDataLoader,
     existing: dict[str, _ExistingNote],
-) -> None:
+    *,
+    verbose: bool = False,
+) -> tuple[int, int]:
     """Render each note's markdown and write `frontmatter + body` to its planned path.
 
     When `existing` reports the note already lives at a different path, we
@@ -456,7 +470,11 @@ def _write_notes(
     and the old file disappears (rename/move support — §11.2). Any frontmatter
     keys we don't own are passed through to `frontmatter.render` as
     `extra_user_keys` to preserve user edits.
+
+    Returns (written_count, unchanged_count) so the caller can summarize.
     """
+    written = 0
+    unchanged = 0
     for d in decoded_notes:
         plan = layout[d.note]
         md_path = target_path / plan.relative_path
@@ -467,6 +485,10 @@ def _write_notes(
             # Move the file into its new location before we rewrite it. Using
             # os.replace keeps the operation atomic on the same filesystem and
             # avoids a half-baked state if the rewrite below fails.
+            if verbose:
+                old_rel = previous.path.relative_to(target_path)
+                new_rel = md_path.relative_to(target_path)
+                print(f"  moving {old_rel} -> {new_rel}")
             os.replace(previous.path, md_path)
 
         body = _render_body(d, md_path, note_path_by_uuid, data_loader)
@@ -478,7 +500,20 @@ def _write_notes(
             extra_user_keys=previous.extras if previous else None,
         )
 
-        md_path.write_text(fm + body, encoding="utf-8")
+        # Skip the write entirely when the on-disk file already matches what
+        # we'd produce. Avoids cloud-sync churn on unchanged notes and lets
+        # the user run re-exports cheaply.
+        new_content = fm + body
+        if md_path.exists():
+            try:
+                if md_path.read_text(encoding="utf-8") == new_content:
+                    unchanged += 1
+                    continue
+            except OSError:
+                pass
+        md_path.write_text(new_content, encoding="utf-8")
+        written += 1
+    return written, unchanged
 
 
 def _render_body(
@@ -502,7 +537,7 @@ def _render_body(
 # ---------- step 7: copy attachments ----------
 
 
-def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> None:
+def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> tuple[int, int]:
     """Copy every attachment's source file into `<vault>/assets/<unique_filename>`.
 
     Skips the copy when an existing dest file already matches the source by
@@ -511,9 +546,13 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> N
     src.mtime == dest.mtime) and the rewrite is avoided — important for
     cloud-synced vaults (iCloud Drive / Dropbox / Obsidian Sync) where any
     inode touch triggers an upload.
+
+    Returns (copied_count, skipped_count) so the caller can summarize.
     """
     assets_dir = target_path / "assets"
     assets_dir.mkdir(exist_ok=True)
+    copied = 0
+    skipped = 0
     for d in decoded_notes:
         for att in d.file_attachments:
             if not (att.file_path and att.unique_filename):
@@ -527,10 +566,14 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> N
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(src, dest)
+                copied += 1
                 continue
             if _dest_already_matches(src, dest):
+                skipped += 1
                 continue
             shutil.copy2(src, dest)
+            copied += 1
+    return copied, skipped
 
 
 def _dest_already_matches(src: Path, dest: Path) -> bool:

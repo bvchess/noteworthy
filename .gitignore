@@ -59,3 +59,9 @@ debug/
 
 # Generated test output
 tests/test_output/
+
+# Smoke-test exports at the repo root (e.g. test_obsidian/, scratch-vault/)
+# — these often contain real Apple Notes content. Use an absolute path
+# outside the repo for real smoke tests.
+/test_obsidian/
+/scratch-vault/

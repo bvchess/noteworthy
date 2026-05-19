@@ -24,13 +24,16 @@ from noteworthy.obsidian import sync
 def _single_note_db(tmp_path: Path, *, title: str, note_pk: int = 100,
                     identifier: str = "uuid-100", protobuf_parts=None,
                     creation_ts: float = 700000000.0,
-                    mod_ts: float = 700000000.0) -> Path:
+                    mod_ts: float = 700000000.0,
+                    db_name: str = "NoteStore.sqlite") -> Path:
     """Build a one-account, one-folder, one-note DB suitable for sync.run.
 
     Returns the path to the SQLite file. `protobuf_parts` follows the
-    `build_note_protobuf` schema; defaults to an empty body.
+    `build_note_protobuf` schema; defaults to an empty body. `db_name` lets
+    callers create more than one DB in the same tmp_path (e.g. to model a
+    second run of the exporter against an evolved source).
     """
-    db_path = tmp_path / "NoteStore.sqlite"
+    db_path = tmp_path / db_name
     b = create_test_db(db_path)
     b.add_account(pk=1, name="iCloud")
     b.add_folder(pk=10, title="Notes", account_pk=1,
@@ -341,6 +344,25 @@ class TestMissingAttachmentFile:
         assert dest.stat().st_ctime == ctime_first, \
             "attachment was re-copied even though source bytes are unchanged"
 
+    def test_unchanged_md_not_rewritten(self, tmp_path):
+        """Same cloud-sync concern applies to .md files: re-exporting an
+        unchanged source must not touch existing notes on disk."""
+        db = _single_note_db(tmp_path, title="Stable")
+        target = tmp_path / "vault"
+        target.mkdir()
+
+        sync.run(target, db_path=db)
+        md = target / "Notes" / "Stable.md"
+        assert md.is_file()
+        ctime_first = md.stat().st_ctime
+
+        import time
+        time.sleep(0.05)
+
+        sync.run(target, db_path=db)
+        assert md.stat().st_ctime == ctime_first, \
+            ".md file was rewritten even though source content is unchanged"
+
     def test_changed_attachment_is_recopied(self, tmp_path):
         """If the source attachment changes, the dest must update."""
         db_path = tmp_path / "NoteStore.sqlite"
@@ -442,6 +464,61 @@ class TestUnicodeNames:
         assert (target / "Notes" / "café — résumé.md").is_file()
         linker_body = (target / "Notes" / "Linker.md").read_text(encoding="utf-8")
         assert "[[café — résumé]]" in linker_body
+
+
+# ---------- verbose mode ----------
+
+
+class TestVerboseOutput:
+    """sync.run(verbose=True) prints a top-line summary plus notable per-action
+    events: renames, moves, skipped notes. Routine no-op writes are not logged
+    even in verbose — per-note chatter dominates the output on real vaults
+    where most of a re-export is unchanged. Non-verbose mode stays quiet on
+    stdout (warnings still go to stderr unchanged).
+    """
+
+    def test_verbose_emits_scan_and_done_summary(self, tmp_path, capsys):
+        db = _single_note_db(tmp_path, title="Hello")
+        target = tmp_path / "vault"
+        target.mkdir()
+        sync.run(target, db_path=db, verbose=True)
+        out = capsys.readouterr().out
+        assert "scanning" in out.lower() or "1 note" in out
+        assert "done" in out.lower()
+
+    def test_verbose_does_not_emit_a_line_per_note(self, tmp_path, capsys):
+        """Even in verbose mode, an unchanged note should not produce its own
+        line. The summary is enough."""
+        db = _single_note_db(tmp_path, title="Quiet")
+        target = tmp_path / "vault"
+        target.mkdir()
+        sync.run(target, db_path=db, verbose=True)
+        out = capsys.readouterr().out
+        # The note's filename should not appear in the output as a per-write line.
+        assert "Quiet.md" not in out
+
+    def test_non_verbose_is_quiet_on_stdout(self, tmp_path, capsys):
+        db = _single_note_db(tmp_path, title="Hello")
+        target = tmp_path / "vault"
+        target.mkdir()
+        sync.run(target, db_path=db)  # verbose defaults to False
+        out = capsys.readouterr().out
+        assert out == ""
+
+    def test_verbose_reports_renames(self, tmp_path, capsys):
+        target = tmp_path / "vault"
+        target.mkdir()
+        sync.run(target, db_path=_single_note_db(tmp_path, title="Original"))
+        capsys.readouterr()  # discard
+
+        sync.run(
+            target,
+            db_path=_single_note_db(tmp_path, title="Renamed", db_name="NoteStore2.sqlite"),
+            verbose=True,
+        )
+        out = capsys.readouterr().out
+        # The rename action is the kind of thing the user wants to know about.
+        assert "Original" in out and "Renamed" in out
 
 
 # ---------- coverage: single-account vault whose only note is locked ----------

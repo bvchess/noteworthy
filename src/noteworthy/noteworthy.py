@@ -41,7 +41,7 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
         help="Print detailed information about each note being exported"
     )
     parser.add_argument(
-        "--obsidian",
+        "-o", "--obsidian",
         action="store_true",
         help="Export as an Obsidian vault (wikilinks, frontmatter Properties, flat note files) "
              "instead of the default backup layout"

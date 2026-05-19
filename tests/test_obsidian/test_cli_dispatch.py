@@ -63,6 +63,11 @@ class TestObsidianFlagParses:
         parsed = noteworthy._parse_args([str(tmp_path)])
         assert parsed.obsidian is False
 
+    def test_short_alias_o(self, tmp_path):
+        """-o is the short form of --obsidian."""
+        parsed = noteworthy._parse_args([str(tmp_path), "-o"])
+        assert parsed.obsidian is True
+
 
 class TestModeStateCompatible:
     def test_obsidian_flag_on_empty_dir_dispatches_to_obsidian(self, spy, tmp_path):

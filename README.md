@@ -78,11 +78,15 @@ python3 <backup_dir>/.noteworthy-viewer/server.py <backup_dir>
 
 ## Obsidian Export Mode
 
-Pass `--obsidian` to write an [Obsidian](https://obsidian.md) vault instead of a Noteworthy backup:
+Pass `--obsidian` (short: `-o`) to write an [Obsidian](https://obsidian.md) vault instead of a Noteworthy backup:
 
 ```bash
 scripts/noteworthy ~/Documents/MyVault --obsidian
+# or, equivalently:
+scripts/noteworthy ~/Documents/MyVault -o
 ```
+
+Add `-v` / `--verbose` to see per-note progress and a summary of attachments copied vs. skipped as already-up-to-date.
 
 The output is shaped to be opened directly in Obsidian — folders match Apple Notes, links between notes become wikilinks, dates and tags appear in the Properties panel, and a minimal `.obsidian/app.json` is written so the vault behaves correctly on first open.
 

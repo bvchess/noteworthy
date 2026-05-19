@@ -111,8 +111,14 @@ class _ExistingNote:
 # ---------- public entry point ----------
 
 
-def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbose: bool = False) -> None:
-    """Export Apple Notes into the Obsidian vault at `target_path`."""
+def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbose: int = 0) -> None:
+    """Export Apple Notes into the Obsidian vault at `target_path`.
+
+    `verbose` is a count, not a bool: 0 = silent, 1 = scan + done summary
+    plus rename/move actions, 2+ = also log every note actually written and
+    every attachment actually copied. Level 2 is for diagnosing spurious
+    rewrites on re-export and is too noisy for routine use.
+    """
     target_path = pathlib.Path(target_path)
     target_path.mkdir(parents=True, exist_ok=True)
 
@@ -143,7 +149,9 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
             decoded, layout, target_path, note_path_by_uuid, data_loader, existing,
             verbose=verbose,
         )
-        attachments_copied, attachments_unchanged = _copy_attachments(decoded, target_path)
+        attachments_copied, attachments_unchanged = _copy_attachments(
+            decoded, target_path, verbose=verbose,
+        )
     finally:
         data_loader.close()
 
@@ -461,7 +469,7 @@ def _write_notes(
     data_loader: DatabaseNoteDataLoader,
     existing: dict[str, _ExistingNote],
     *,
-    verbose: bool = False,
+    verbose: int = 0,
 ) -> tuple[int, int]:
     """Render each note's markdown and write `frontmatter + body` to its planned path.
 
@@ -511,6 +519,8 @@ def _write_notes(
                     continue
             except OSError:
                 pass
+        if verbose >= 2:
+            print(f"  writing {md_path.relative_to(target_path)}")
         md_path.write_text(new_content, encoding="utf-8")
         written += 1
     return written, unchanged
@@ -537,7 +547,8 @@ def _render_body(
 # ---------- step 7: copy attachments ----------
 
 
-def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> tuple[int, int]:
+def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path,
+                      *, verbose: int = 0) -> tuple[int, int]:
     """Copy every attachment's source file into `<vault>/assets/<unique_filename>`.
 
     Skips the copy when an existing dest file already matches the source by
@@ -566,11 +577,16 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path) -> t
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(src, dest)
+                if verbose >= 2:
+                    print(f"  copying assets/{att.unique_filename}/ (directory)")
                 copied += 1
                 continue
             if _dest_already_matches(src, dest):
                 skipped += 1
                 continue
+            if verbose >= 2:
+                reason = "new" if not dest.exists() else "changed"
+                print(f"  copying assets/{att.unique_filename} ({reason})")
             shutil.copy2(src, dest)
             copied += 1
     return copied, skipped

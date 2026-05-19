@@ -37,8 +37,10 @@ def _parse_args(args: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "-v", "--verbose",
-        action="store_true",
-        help="Print detailed information about each note being exported"
+        action="count",
+        default=0,
+        help="Print export progress. Repeat (-vv) to log every note and attachment "
+             "actually written or copied — useful for diagnosing spurious rewrites."
     )
     parser.add_argument(
         "-o", "--obsidian",

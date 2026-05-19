@@ -508,10 +508,14 @@ def _write_notes(
             extra_user_keys=previous.extras if previous else None,
         )
 
-        # Skip the write entirely when the on-disk file already matches what
-        # we'd produce. Avoids cloud-sync churn on unchanged notes and lets
-        # the user run re-exports cheaply.
-        new_content = fm + body
+        # Normalize line endings to pure-\n. Apple Notes' protobuf occasionally
+        # includes lone \r characters (paragraph separators in some note types).
+        # Python's read_text() applies universal-newlines translation (\r -> \n
+        # on read), so a file containing raw \r round-trips as \n — and the
+        # skip-if-content-matches check below would always fail, rewriting the
+        # file on every export. Stripping \r at write time guarantees pure-\n
+        # on disk and a stable round trip.
+        new_content = (fm + body).replace("\r\n", "\n").replace("\r", "\n")
         if md_path.exists():
             try:
                 if md_path.read_text(encoding="utf-8") == new_content:
@@ -574,6 +578,9 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path,
                 continue
             dest = assets_dir / att.unique_filename
             if src.is_dir():
+                if _dir_already_matches(src, dest):
+                    skipped += 1
+                    continue
                 if dest.exists():
                     shutil.rmtree(dest)
                 shutil.copytree(src, dest)
@@ -590,6 +597,32 @@ def _copy_attachments(decoded_notes: list[_DecodedNote], target_path: Path,
             shutil.copy2(src, dest)
             copied += 1
     return copied, skipped
+
+
+def _dir_already_matches(src: Path, dest: Path) -> bool:
+    """True if `dest` is an existing directory whose tree matches `src`'s tree.
+
+    Compared by the relative-path-to-(size, mtime) map of every file underneath.
+    A real change (added/removed/edited file inside the directory) shifts at
+    least one entry, so we re-copy. Otherwise we leave the tree untouched —
+    same idempotence story as single-file attachments.
+    """
+    if not dest.exists() or not dest.is_dir():
+        return False
+    try:
+        return _dir_signature(src) == _dir_signature(dest)
+    except OSError:
+        return False
+
+
+def _dir_signature(root: Path) -> dict[str, tuple[int, float]]:
+    """Map of relative_path -> (size, mtime) for every file under `root`."""
+    sig: dict[str, tuple[int, float]] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            st = path.stat()
+            sig[str(path.relative_to(root))] = (st.st_size, st.st_mtime)
+    return sig
 
 
 def _dest_already_matches(src: Path, dest: Path) -> bool:

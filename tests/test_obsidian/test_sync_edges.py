@@ -344,6 +344,46 @@ class TestMissingAttachmentFile:
         assert dest.stat().st_ctime == ctime_first, \
             "attachment was re-copied even though source bytes are unchanged"
 
+    def test_carriage_return_in_body_does_not_cause_perpetual_rewrite(self, tmp_path):
+        """Apple Notes' protobuf occasionally contains lone \\r characters in
+        note_text. read_text() applies universal-newlines translation (\\r ->
+        \\n), so a comparison against the in-memory new_content (which still
+        has \\r) always fails — and the file gets rewritten on every run.
+
+        Fix: normalize \\r out of the content before writing, so the on-disk
+        file is pure-\\n and round-trips identically.
+        """
+        db_path = tmp_path / "NoteStore.sqlite"
+        b = create_test_db(db_path)
+        b.add_account(pk=1, name="iCloud")
+        b.add_folder(pk=10, title="Notes", account_pk=1,
+                     identifier="folder-10", sort_order=1, folder_type=0)
+        b.add_note(pk=100, title="Has CR", folder_pk=10, identifier="uuid-100",
+                   creation_ts=700000000.0, mod_ts=700000000.0)
+        # Body containing a lone \r mid-text, the way Apple Notes does.
+        b.add_note_data(note_pk=100, data=build_note_protobuf([
+            "Line one\rLine two\n",
+        ]))
+        b.build()
+
+        target = tmp_path / "vault"
+        target.mkdir()
+
+        sync.run(target, db_path=db_path)
+        md = target / "Notes" / "Has CR.md"
+        assert md.is_file()
+        # On-disk file must not contain a raw \r — otherwise re-export churns.
+        assert b"\r" not in md.read_bytes(), \
+            "carriage return leaked into on-disk file; re-export will churn"
+        ctime_first = md.stat().st_ctime
+
+        import time
+        time.sleep(0.05)
+
+        sync.run(target, db_path=db_path)
+        assert md.stat().st_ctime == ctime_first, \
+            ".md with normalized \\r was still rewritten on re-export"
+
     def test_unchanged_md_not_rewritten(self, tmp_path):
         """Same cloud-sync concern applies to .md files: re-exporting an
         unchanged source must not touch existing notes on disk."""

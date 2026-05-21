@@ -137,7 +137,7 @@ def run(target_path: pathlib.Path, db_path: pathlib.Path | None = None, *, verbo
 
     data_loader = DatabaseNoteDataLoader(str(db_path or _DEFAULT_DB))
     try:
-        decoded = _decode_all_notes(layout, data_loader, verbose=verbose)
+        decoded = _decode_all_notes(layout, data_loader)
         _assign_attachment_filenames(decoded)
 
         note_path_by_uuid = {
@@ -322,8 +322,6 @@ def _compute_aliases(
 def _decode_all_notes(
     layout: dict[Note, _NoteLayout],
     data_loader: DatabaseNoteDataLoader,
-    *,
-    verbose: bool,
 ) -> list[_DecodedNote]:
     """Decode each planned note's protobuf body and resolve attachment metadata.
 

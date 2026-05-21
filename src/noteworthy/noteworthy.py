@@ -18,7 +18,7 @@ __all__ = ["make_copies"]
 
 _target_path: pathlib.Path | None = None
 _db_path: pathlib.Path | None = None
-_verbose: bool = False
+_verbose: int = 0
 _counts: dict[str, int] = {"created": 0, "updated": 0, "deleted": 0, "moved": 0}
 
 

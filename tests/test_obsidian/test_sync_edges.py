@@ -510,7 +510,7 @@ class TestUnicodeNames:
 
 
 class TestVerboseOutput:
-    """sync.run(verbose=True) prints a top-line summary plus notable per-action
+    """sync.run(verbose=1) prints a top-line summary plus notable per-action
     events: renames, moves, skipped notes. Routine no-op writes are not logged
     even in verbose — per-note chatter dominates the output on real vaults
     where most of a re-export is unchanged. Non-verbose mode stays quiet on
@@ -521,7 +521,7 @@ class TestVerboseOutput:
         db = _single_note_db(tmp_path, title="Hello")
         target = tmp_path / "vault"
         target.mkdir()
-        sync.run(target, db_path=db, verbose=True)
+        sync.run(target, db_path=db, verbose=1)
         out = capsys.readouterr().out
         assert "scanning" in out.lower() or "1 note" in out
         assert "done" in out.lower()
@@ -532,7 +532,7 @@ class TestVerboseOutput:
         db = _single_note_db(tmp_path, title="Quiet")
         target = tmp_path / "vault"
         target.mkdir()
-        sync.run(target, db_path=db, verbose=True)
+        sync.run(target, db_path=db, verbose=1)
         out = capsys.readouterr().out
         # The note's filename should not appear in the output as a per-write line.
         assert "Quiet.md" not in out
@@ -554,7 +554,7 @@ class TestVerboseOutput:
         sync.run(
             target,
             db_path=_single_note_db(tmp_path, title="Renamed", db_name="NoteStore2.sqlite"),
-            verbose=True,
+            verbose=1,
         )
         out = capsys.readouterr().out
         # The rename action is the kind of thing the user wants to know about.
